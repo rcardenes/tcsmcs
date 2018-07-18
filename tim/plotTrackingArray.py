@@ -25,9 +25,12 @@ sys.path.insert(0,'../')
 from swglib.export import DataManager, get_exporter
 
 ENABLE_CACHING = True #TODO: Enable sample set for caching
-    
+
 LEGEND_LOCATION = 'lower left'
-TZ = 'America/Santiago'
+TZ = {
+        'CP': 'America/Santiago',
+        'MK': 'Pacific/Honolulu'
+        }
 PLOT_ZONE_FILE = './zones.cfg'
 MARKERSIZE = 2.5
 
@@ -104,7 +107,7 @@ if SITE == 'cp':
 else:
     raise NotImplementedError("The script hasn't still been adapted for MK")
 
-timezone = pytz.timezone(TZ)
+timezone = pytz.timezone(TZ['CP'])
 
 DEBUG = False
 
@@ -113,16 +116,18 @@ def parse_args():
     enableDebugDate = "debug"
 
     parser = argparse.ArgumentParser(description='Filter PMAC Error data')
-    parser.add_argument('-sys',    '--system',           dest='system',            default='tcs', help='System to be analyzed: tcs, mcs or both')
-    parser.add_argument('-date',    '--date',           dest='date',            default=enableDebugDate, help='Date - format YYYY-MM-DD')
-    parser.add_argument('-day',   '--eng_mode',        dest='eng_mode',          action='store_true', help='If used daytime will be analyzed 6am-6pm')
-    parser.add_argument('-scale',   '--scale',        dest='scale',  type=float,  default=1.0, help='Scale to be applied to data')
-    parser.add_argument('-cols',   '--columns',        dest='cols',          default='4,5', help='Columns to be plotted')
-    parser.add_argument('-axis',   '--axis',        dest='axis',          default='az', help='Axis to be plotted, can be az or el')
-    parser.add_argument('-time',   '--time_range',        dest='time_rng',    default=None, help='Specific time range format: HHMM-HHMM')
+    parser.add_argument('-mk',     '--mk',         dest='maunakea', action='store_true', help='The site is Mauna Kea (affects timezone). Default is Cerro Pachon')
+    parser.add_argument('-sys',    '--system',     dest='system',   default='tcs', help='System to be analyzed: tcs, mcs or both')
+    parser.add_argument('-date',   '--date',       dest='date',     default=enableDebugDate, help='Date - format YYYY-MM-DD')
+    parser.add_argument('-day',    '--eng_mode',   dest='eng_mode', action='store_true', help='If used daytime will be analyzed 6am-6pm')
+    parser.add_argument('-scale',  '--scale',      dest='scale',    type=float,  default=1.0, help='Scale to be applied to data')
+    parser.add_argument('-cols',   '--columns',    dest='cols',     default='4,5', help='Columns to be plotted')
+    parser.add_argument('-axis',   '--axis',       dest='axis',     default='az', help='Axis to be plotted, can be az or el')
+    parser.add_argument('-time',   '--time_range', dest='time_rng', default=None, help='Specific time range format: HHMM-HHMM')
     
-    parser.add_argument('-mode',   '--plot_mode',               dest='mode',          default=EXEC_TIME_MODE,
+    parser.add_argument('-mode',   '--plot_mode',  dest='mode',          default=EXEC_TIME_MODE,
                         help='Different ways of representing the data, could be: {0}, {1} or {2}'.format(EXEC_TIME_MODE, POS_DIFF_MODE, PERIOD_MODE))
+    parser.add_argument('-cutoff', '--cutoff',     dest='cutoff',   type=float, default=None, help='Cut the plots a this many sigmas (default, None)')
 
     args = parser.parse_args()
 
@@ -319,6 +324,39 @@ def addZones(ax, begin, end):
 # Put a legend to the right of the current axis
     ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
 
+class YLimitCalculator(object):
+    def __init__(self, sigmas):
+        self.sigmas = sigmas
+
+    def __call__(self, axis, data, offset=None):
+        if not self.sigmas:
+            return
+
+        data = np.array(data)
+        avg, std = data.mean(), data.std()
+        smax, smin = avg + (std * self.sigmas), avg - (std * self.sigmas)
+        if smax < smin:
+            smax, smin = smin, smax
+        mn, mx = data.min(), data.max()
+        if (smin < mn < smax) and (smin < mx < smax):
+            if offset is None:
+                return
+            smin = mn - abs(mn)*0.15
+            smax = mx + abs(mx)*0.15
+
+        if self.sigmas is None:
+            amin = min(smin, mn - abs(mn * 0.15))
+            amax = max(smax, mx + abs(mn * 0.15))
+        else:
+            amin = max(smin, mn - abs(mn * 0.15))
+            amax = min(smax, mx + abs(mn * 0.15))
+
+        if offset is not None:
+            amin += offset
+            amax += offset
+
+        axis.set_ylim(amin, amax)
+
 def plotPeriod():
     """
     Here we are measuring periodicity between executions
@@ -493,13 +531,13 @@ def plotPosDiff():
     
     fig, ax1 = plt.subplots()   
     plt.title("TCS-MCS Communication Analysis: {0} data from {1}".format(args.system, args.date))
-    
+
     #Plot AZ
     ax1.plot(azTime, azVal, "b.-", markersize=MARKERSIZE)
     ax1.grid(True)
     ax1.tick_params("y", colors="b")
-    ax1.set_ylabel("Azimuth difference between samples (not respecting timestamp - velocity)", color="b")
-    ax1.set_ylim(-10, 10)
+    ax1.set_ylabel("Azimuth difference between samples\n(not respecting timestamp - velocity)", color="b")
+    conditionallySetYLim(ax1, azVal, offset = abs(max(azVal)) * 0.05)
     
     #Plot EL
     elTime, elVal=zip(*el_lst)
@@ -507,7 +545,7 @@ def plotPosDiff():
     ax2.plot(elTime, elVal, "r.-", markersize=MARKERSIZE)
     ax2.tick_params("y", colors="r")
     ax2.set_ylabel("Elevation", color="r")
-    ax2.set_ylim(-10, 10)
+    conditionallySetYLim(ax2, elVal, offset = abs(min(elVal)) * -0.05)
 
     print "Number of detected period outliers: {0}".format(outliersInPeriod)
     print "Watch out: plot ylim set to -10 , 10 some information may not be shown on the graph" #TODO: At least count samples left out and report
@@ -556,14 +594,14 @@ def plotVel():
     ax1.grid(True)
     ax1.tick_params("y", colors="r")
     ax1.set_ylabel("Raw pos. diff [as]", color="r")
-    ax1.set_ylim(-10, 10)
+    conditionallySetYLim(ax1, posDiff_lst)
 
     ax2 = plt.subplot(212, sharex=ax1)
     ax2.plot(timebase, vel_lst, "b.-", markersize=MARKERSIZE)
     ax2.grid(True)
     ax2.tick_params("y", colors="b")
     ax2.set_ylabel("Calculated vel. [as/s]", color="b")
-    ax2.set_ylim(-30, 30)
+    conditionallySetYLim(ax2, vel_lst)
     
     print "Number of detected period outliers: {0}".format(outliersInPeriod)
     print "Watch out: plot ylim set to -10 , 10 some information may not be shown on the graph" #TODO: At least count samples left out and report
@@ -645,7 +683,7 @@ def plotFull():
     ax1.grid(True)
     ax1.tick_params("y", colors="b")
     ax1.set_ylabel("Diff timeNow [ms]", color="b")
-    ax1.set_ylim(-200, 500)
+    conditionallySetYLim(ax1, diffVal)
 
     if outliersInPeriod > 0:
         #ax1.set_ylim(*periodLimits)
@@ -664,7 +702,7 @@ def plotFull():
     ax2.plot(execTime, execVal, "r.")
     ax2.tick_params("y", colors="r")
     ax2.set_ylabel("Tick - tnow [ms]", color="r")
-    ax2.set_ylim(-10, 60)
+    conditionallySetYLim(ax2, execVal)
 
     if args.system=='both':
         # Plot 3
@@ -675,7 +713,7 @@ def plotFull():
         ax4.plot(pmacTime, pmacVal, "r-")
         ax4.tick_params("y", colors="r")
         ax4.set_ylabel("Elevation Pmac Error [arcsec]", color="r")
-        ax4.set_ylim(-15, 15)
+        conditionallySetYLim(ax4, pmacVal)
 
     # Plot 4
     dmdTime, diffDmd=zip(*dDmd_lst)
@@ -685,7 +723,7 @@ def plotFull():
     ax3.grid(True)
     ax3.tick_params("y", colors="b")
     ax3.set_ylabel("Diff EL Demand [arcsec]", color="b")
-    ax3.set_ylim(-10, 10)
+    conditionallySetYLim(ax3, diffDmd)
     """
     plt.setp(ax1.get_xticklabels(), fontsize=9, visible=False)
     plt.setp(ax2.get_xticklabels(), fontsize=9, visible=False)
@@ -751,12 +789,17 @@ def plotEng():
 # -----------------------------------------------------------------------------
 args = parse_args()
 
+conditionallySetYLim = YLimitCalculator(sigmas = args.cutoff)
+
+if args.maunakea:
+    timezone = pytz.timezone(TZ['MK'])
+
 if args.mode == EXEC_TIME_MODE :
     plotExecTime()
 
 elif args.mode == POS_DIFF_MODE:
     plotPosDiff()
-    
+
 elif args.mode == RAW_MODE:
     plotRaw()
 
@@ -765,7 +808,7 @@ elif args.mode == RAW_DIFF_MODE:
 
 elif args.mode == PERIOD_MODE:
    plotPeriod()
-   
+
 elif args.mode == VEL_MODE:
     plotVel()
    
