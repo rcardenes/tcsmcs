@@ -1,35 +1,82 @@
 import numpy as np
+from numpy import logical_and as land
+from numpy import logical_or as lor
 import numpy.ma as ma
 import matplotlib.pyplot as plt
 import datetime as dt
 import pandas as pd
 import sys, os, fnmatch
 import pickle
+import argparse
+import json
+from collections import namedtuple
+
+Span = namedtuple('Span', 'first last color alpha')
+
+def parseargs():
+    parser = argparse.ArgumentParser(description="Plot PV executiong time jitter")
+    parser.add_argument("--force", "-f", action="store_true",
+            help="Rewrite exising plots instead of bypassing them")
+    parser.add_argument("--site", "-i", choices=('MKO', 'CPO'), default='MKO')
+    megroup = parser.add_mutually_exclusive_group(required=True)
+    megroup.add_argument("--subsys", "-s",
+            help="Plots all the available data for the given subsystem")
+    megroup.add_argument("--source", "-r",
+            help="Plot only these source files (comma separated)")
+    parser.add_argument("--threshold", "-t", type=float,
+            help="Cut-off. Jitter over this value is not plotted on the left axis")
+    parser.add_argument("--sigmas", type=float,
+            help="No threshold, plot is vertically centered on the mean value, and displays only 'n' sigmas above and under")
+    parser.add_argument("--no-outliers", "-n", dest='outliers', action='store_false',
+            help="DO NOT plot outliers over the threshold. By default, they're plotted on the right axis, if there is a threshold AND 'sigmas' is not used")
+    parser.add_argument("--metadata", "-m",
+            help="Path to a file that contains plotting definitions")
+
+    return parser.parse_args()
 
 def returnold(folder):
     matches = []
     for root, dirnames, filenames in os.walk(folder):
-        for filename in fnmatch.filter(filenames, '*.*'):
+        for filename in fnmatch.filter(filenames, '*.pkl'):
             matches.append(os.path.join(root, filename))
     return sorted(matches, key=os.path.getmtime)
+
+def vertical_spans(spans, data):
+    for span in spans:
+        dfr, dto = (dt.datetime.strptime(span['from'], '%Y-%m-%d %H:%M:%S'),
+                    dt.datetime.strptime(span['to'],   '%Y-%m-%d %H:%M:%S'))
+        try:
+            yield(Span(first = np.where(data >= dfr)[0][0],
+                       last  = np.where(data <= dto)[0][-1],
+                       color = span.get('color', 0.2),
+                       alpha = float(span.get('alpha', 0.2))))
+        except IndexError:
+            pass
 
 def movingaverage(interval, window_size):
     window= np.ones(int(window_size))/float(window_size)
     return np.convolve(interval, window, 'same')
 
+args = parseargs()
+site = args.site
+system = args.subsys
+threshold = args.threshold
+sigmas = args.sigmas
+plot_outliers = args.outliers
+metadata = {}
 
-if (len(sys.argv) < 3):
-    print  "Useage: python plot2.py <site> <system> <threshold>"
-    print  "	    example: $python plot2.py MKO crcs"
-    sys.exit()
-
-site = sys.argv[1]
-system = sys.argv[2]
-threshold = float(sys.argv[3])
+if args.metadata is not None:
+    try:
+        with open(args.metadata) as md:
+            metadata = json.load(md)
+    except IOError:
+        print >> sys.stderr, "Not a valid path: %s" % args.metadata
 
 outpath = './'+system+'Png'+site
-rawFilePath = './'+system+'binary'+site
+rawFilePath = './'+system+'Binary'+site
+
 print "Looking for pickles inside %s." % rawFilePath
+
 dates = []
 exclude_counts = []
 r1counts = []
@@ -37,10 +84,10 @@ r2counts = []
 r3counts = []
 
 for f in returnold(rawFilePath):
-	
     outfile = "%s/%s%s" % (outpath, os.path.splitext(os.path.basename(f))[0], '.png')
+    print outfile
     # Has pickle file been processed inside the binary folder yet?
-    if os.path.isfile(outfile):
+    if os.path.isfile(outfile) and not args.force:
         print "Will BYPASS %s..." % (f)
         continue
     else:
@@ -67,38 +114,32 @@ for f in returnold(rawFilePath):
         s3Left = (mu - 3*sigma)
         s3Right = (mu + 3*sigma)
 
-        # The masks apply to ranges you don't want, they're MASKED!
-        #   the result is an array with the values you do want
-        #
-        # Include points not exceeding the input threshold
-        mx_include = ma.masked_array(tt1, mask = (tt1 > threshold))
+        if threshold is not None:
+            # The masks apply to ranges you don't want, they're MASKED!
+            #   the result is an array with the values you do want
+            #
+            # Include points not exceeding the input threshold
+            mx_include = ma.masked_array(tt1, mask = (tt1 > threshold))
 
-        # Exclude points that exceed the input threshold
-        mx_exclude = ma.masked_array(tt1, mask = (tt1 < threshold))
-        exclude_counts.append(mx_exclude.count())
-        print len(tt1)
+            # Exclude points that exceed the input threshold
+            mx_exclude = ma.masked_array(tt1, mask = (tt1 < threshold))
+            exclude_counts.append(mx_exclude.count())
+        else:
+            mx_include = tt1
+            mx_exclude = ma.masked_array([])
+            exclude_counts.append(0)
         
-        r1counts.append( len([ i for i in tt1 if ( (s1Left <= i)  & (i <= s1Right)) ] ) )
-        r2counts.append( len([ i for i in tt1 if ( ((s1Left >= i)  & (s2Left <= i)) | ((i >= s1Right) & (i <= s2Right)))] ) )
-        r3counts.append( len([ i for i in tt1 if ( ((s2Left >= i)  & (s3Left <= i)) | ((i >= s2Right) & (i <= s3Right)))] ) )
+        r1counts.append(ma.masked_array(tt1, land(tt1 >= s1Left, tt1 <= s1Right)).count())
+        r2counts.append(ma.masked_array(tt1, lor(land(tt1 <= s1Left, tt1 >= s2Left), land(tt1 >= s1Right, tt1 <= s2Right))).count())
+        r3counts.append(ma.masked_array(tt1, lor(land(tt1 <= s2Left, tt1 >= s3Left), land(tt1 >= s2Right, tt1 <= s3Right))).count())
 
-        
-        #range1 = ma.masked_array(tt1, mask = (s1Left >= tt1) | (tt1 >= s1Right)& 
-        #                                     (s2Left <= tt1) | (tt1 <= s2Right) )# ~0.6827 #Strictly in the -1sigma and +1sigma band
+        if threshold is not None:
+            print '\tExtreme counts greater than %f = %d' % (threshold, mx_exclude.count())
+            
+        print '\tR1C=%d, R2C=%d, R3C=%d' % (r1counts[-1], r2counts[-1], r3counts[-1])
 
-        #range2 = ma.masked_array(tt1, mask = (s2Left >= tt1) & (tt1 >= s2Right) &
-        #                                     (s3Left <= tt1) & (tt1 <= s3Right) )# ~0.9545 #Strictly in the -2sigma and +2sigma band
-
-        #range3 = ma.masked_array(tt1, mask = (s3Left >= tt1) & (tt1 >= s3Right) &
-        #                                     (0.0 <= tt1) & (tt1 <= float('inf')) )# ~0.9973
-
-	print '\tExtreme counts greater than %f = %d\n\tR1C=%d, R2C=%d, R3C=%d' % (threshold, mx_exclude.count(), 
-                                                                                   r1counts[-1], r2counts[-1], r3counts[-1] )
-	num_bins = 100
         my_dpi=96
 	fig, ax1 = plt.subplots(figsize=(1920/my_dpi, 1200/my_dpi), dpi=my_dpi, facecolor='w', edgecolor='k')
-	# the histogram of the data
-	#n, bins, patches = ax.hist(tt1, num_bins)
 	
 	ax1.plot(mx_include,"b.", markersize=2)
 	#plt.plot(tt2,"r")
@@ -106,13 +147,23 @@ for f in returnold(rawFilePath):
 	ax1.set_title("%s %s Sample Rate Jitter\nRange %s " % (site, system, myrange) )
 	ax1.set_xlabel("Sample Number")
 	ax1.set_ylabel("Delta T (seconds)")
-        ax1.set_ylim(0, threshold)
+        if sigmas is not None:
+            med = np.median(mx_include)
+            std = np.std(mx_include)
+            ax1.set_ylim(med - (std * 2), med + (std * 2))
+        elif threshold is not None:
+            ax1.set_ylim(0, threshold)
+
         ax1.tick_params('y', colors='b')
-	
-        ax2 = ax1.twinx()
-	ax2.plot(mx_exclude,"r.", markersize=10)
-	ax2.set_ylabel("Excluded Delta T values (seconds)", color='r')
-        ax2.tick_params('y', colors='r')
+
+        if threshold is not None and not sigmas and plot_outliers and mx_exclude.count() > 0:
+            ax2 = ax1.twinx()
+            ax2.plot(mx_exclude,"r.", markersize=10)
+            ax2.set_ylabel("Excluded Delta T values (seconds)", color='r')
+            ax2.tick_params('y', colors='r')
+
+        for span in vertical_spans(metadata.get('vertical-spans', []), ts):
+            plt.axvspan(span.first, span.last, facecolor=span.color, alpha=span.alpha)
 
 	fig.tight_layout()
 	fig.savefig(outfile, dpi=my_dpi)
