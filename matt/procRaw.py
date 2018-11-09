@@ -5,6 +5,15 @@ import pandas as pd
 import sys, os, fnmatch
 import pickle
 
+class PathBuilder(object):
+    def __init__(self, system, site, prefix='.'):
+        self.prefix = prefix
+        self.system = system
+        self.site = site
+
+    def path(self, kind):
+        return os.path.join(self.prefix, '{0}{1}{2}'.format(self.system, kind, self.site))
+
 def returnold(folder):
     matches = []
     for root, dirnames, filenames in os.walk(folder):
@@ -19,8 +28,9 @@ if (len(sys.argv) < 2):
 
 site = sys.argv[1]
 system = sys.argv[2]
-rawFilePath = './'+system+'Data'+site
-binoutpath = './'+system+'binary'+site
+pb = PathBuilder(system, site)
+rawFilePath = pb.path('Data')
+binoutPath = pb.path('Binary')
 
 print "Looking for RAW Data inside %s." % rawFilePath
 
@@ -29,7 +39,7 @@ col_names = ["Timestamp", "data1"]
 dtypes = ["object", "float"]
 
 for f in returnold(rawFilePath):
-    tsFilename = "%s/%s%s" % (binoutpath, os.path.basename(f), '.pkl')
+    tsFilename = "%s/%s%s" % (binoutPath, os.path.basename(f), '.pkl')
     # Has pickle file been processed inside the binary folder yet?
     if os.path.isfile(tsFilename):
         print "Will BYPASS %s..." % (f)
@@ -47,8 +57,9 @@ for f in returnold(rawFilePath):
             print "Saving %s to disk." % tsFilename
             pickle.dump(ts, tsFile)
             print "done"
-        except ValueError:
+        except ValueError, e:
             print "Could not convert data proper format."
+            print e
         #sys.exit()
 
 print "done."
