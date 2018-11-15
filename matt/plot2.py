@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+
 import numpy as np
 from numpy import logical_and as land
 from numpy import logical_or as lor
@@ -15,14 +17,16 @@ Span = namedtuple('Span', 'first last color alpha')
 
 def parseargs():
     parser = argparse.ArgumentParser(description="Plot PV executiong time jitter")
+    parser.add_argument("--list", "-l", action="store_true",
+            help="List the available files for a certain site a subsystem, and terminate the script")
     parser.add_argument("--force", "-f", action="store_true",
             help="Rewrite exising plots instead of bypassing them")
-    parser.add_argument("--site", "-i", choices=('MKO', 'CPO'), default='MKO')
-    megroup = parser.add_mutually_exclusive_group(required=True)
-    megroup.add_argument("--subsys", "-s",
-            help="Plots all the available data for the given subsystem")
-    megroup.add_argument("--source", "-r",
-            help="Plot only these source files (comma separated)")
+    parser.add_argument("site", choices=('MKO', 'CPO'),
+            help="Site. Choose one of the available options")
+    parser.add_argument("subsys",
+            help="Subsystem name. Used to build up the directories names")
+    parser.add_argument("source", nargs='*',
+            help="If specified, plot only these source files (use the raw file name). Otherwise, all files for the subsystem will be considered. The paths are relative to the subsystem. Force (-f) is implied")
     parser.add_argument("--threshold", "-t", type=float,
             help="Cut-off. Jitter over this value is not plotted on the left axis")
     parser.add_argument("--sigmas", type=float,
@@ -34,36 +38,82 @@ def parseargs():
 
     return parser.parse_args()
 
-def returnold(folder):
+def list_pkl_in_folder(folder):
     matches = []
     for root, dirnames, filenames in os.walk(folder):
         for filename in fnmatch.filter(filenames, '*.pkl'):
             matches.append(os.path.join(root, filename))
     return sorted(matches, key=os.path.getmtime)
 
-def vertical_spans(spans, data):
-    for span in spans:
-        dfr, dto = (dt.datetime.strptime(span['from'], '%Y-%m-%d %H:%M:%S'),
-                    dt.datetime.strptime(span['to'],   '%Y-%m-%d %H:%M:%S'))
+class TimeSpans(object):
+    def __init__(self):
+        self._cache = {}
+        self._data = None
+
+    def set_data(self, data):
+        self._data = data
+
+    def to_counts(self, start, end):
+        if self._data is None:
+            raise RuntimeError("Can't calculate spans without data")
+
+        key = hash(start + end)
         try:
-            yield(Span(first = np.where(data >= dfr)[0][0],
-                       last  = np.where(data <= dto)[0][-1],
-                       color = span.get('color', 0.2),
-                       alpha = float(span.get('alpha', 0.2))))
-        except IndexError:
+            return self._cache[key]
+        except KeyError:
             pass
+        dfr, dto = (dt.datetime.strptime(start, '%Y-%m-%d %H:%M:%S'),
+                    dt.datetime.strptime(end,   '%Y-%m-%d %H:%M:%S'))
+        try:
+            fr, to = (np.where(self._data >= dfr)[0][0],
+                      np.where(self._data <= dto)[0][-1])
+        except IndexError:
+            return None
+        self._cache[key] = (fr, to)
+
+        return (fr, to)
+
+    def vertical_span(self, raw_span):
+        try:
+            fr, to = self.to_counts(raw_span['from'], raw_span['to'])
+            return Span(first = fr,
+                        last  = to,
+                        color = raw_span.get('color', 0.2),
+                        alpha = float(raw_span.get('alpha', 0.2)))
+        except TypeError:
+            return Span(-1, -1, 0, 0)
 
 def movingaverage(interval, window_size):
     window= np.ones(int(window_size))/float(window_size)
     return np.convolve(interval, window, 'same')
 
+timeSpans = TimeSpans()
+
 args = parseargs()
 site = args.site
 system = args.subsys
+source = args.source
+
+outpath = './'+system+'Png'+site
+rawFilePath = './'+system+'Binary'+site
+
+if args.list:
+    for root, dirnames, filenames in os.walk(folder):
+        for filename in fnmatch.filter(filenames, '*.pkl'):
+            print filename
+    sys.exit(0)
+
+if not source:
+    the_pkl = list_pkl_in_folder(rawFilePath)
+else:
+    the_pkl = [os.path.join(rawFilePath, fname + '.pkl') for fname in source]
+    args.force = True
+
 threshold = args.threshold
 sigmas = args.sigmas
 plot_outliers = args.outliers
 metadata = {}
+title = None
 
 if args.metadata is not None:
     try:
@@ -72,8 +122,8 @@ if args.metadata is not None:
     except IOError:
         print >> sys.stderr, "Not a valid path: %s" % args.metadata
 
-outpath = './'+system+'Png'+site
-rawFilePath = './'+system+'Binary'+site
+if 'vertical-spans' not in metadata:
+    metadata['vertical-spans'] = []
 
 print "Looking for pickles inside %s." % rawFilePath
 
@@ -83,7 +133,7 @@ r1counts = []
 r2counts = []
 r3counts = []
 
-for f in returnold(rawFilePath):
+for f in the_pkl:
     outfile = "%s/%s%s" % (outpath, os.path.splitext(os.path.basename(f))[0], '.png')
     print outfile
     # Has pickle file been processed inside the binary folder yet?
@@ -92,12 +142,28 @@ for f in returnold(rawFilePath):
         continue
     else:
         ts = pd.read_pickle(open(f, 'r'))
+        timeSpans.set_data(ts)
         #print ts
         #myrange = "%s to %s" % (mydata['Timestamp'][0], mydata['Timestamp'][mydata.size-1] )
         myrange = "%s to %s" % (ts[0], ts[ts.size-1])
         dates.append(ts[0].date())
 	diffs = np.diff(ts)
 	tt1 = diffs / np.timedelta64(1, 's')
+
+        try:
+            for gap in metadata['gaps']:
+                try:
+                    fr, to = timeSpans.to_counts(gap['from'], gap['to'])
+                    metadata['vertical-spans'].append({
+                        'from':  gap['from'],
+                        'to':    gap['to'],
+                        'color': 'r'
+                        })
+                except TypeError:
+                    pass
+        except KeyError:
+            pass
+
 	#tt2 = movingaverage(tt1, 2)
 
         #Basic stats on our data
@@ -144,9 +210,13 @@ for f in returnold(rawFilePath):
 	ax1.plot(mx_include,"b.", markersize=2)
 	#plt.plot(tt2,"r")
 	ax1.grid(True)
-	ax1.set_title("%s %s Sample Rate Jitter\nRange %s " % (site, system, myrange) )
+        if title is not None:
+            pass
+        else:
+            ax1.set_title("%s %s Sample Rate Jitter\nRange %s " % (site, system, myrange) )
 	ax1.set_xlabel("Sample Number")
 	ax1.set_ylabel("Delta T (seconds)")
+
         if sigmas is not None:
             med = np.median(mx_include)
             std = np.std(mx_include)
@@ -162,8 +232,11 @@ for f in returnold(rawFilePath):
             ax2.set_ylabel("Excluded Delta T values (seconds)", color='r')
             ax2.tick_params('y', colors='r')
 
-        for span in vertical_spans(metadata.get('vertical-spans', []), ts):
-            plt.axvspan(span.first, span.last, facecolor=span.color, alpha=span.alpha)
+        last_element = len(tt1) - 1
+        for span in [timeSpans.vertical_span(vs) for vs in metadata.get('vertical-spans', [])]:
+            if span.first >= last_element or span.first < 0:
+                continue
+            plt.axvspan(span.first, min(span.last, last_element), facecolor=span.color, alpha=span.alpha)
 
 	fig.tight_layout()
 	fig.savefig(outfile, dpi=my_dpi)
