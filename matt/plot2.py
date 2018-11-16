@@ -5,6 +5,7 @@ from numpy import logical_and as land
 from numpy import logical_or as lor
 import numpy.ma as ma
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import datetime as dt
 import pandas as pd
 import sys, os, fnmatch
@@ -12,6 +13,7 @@ import pickle
 import argparse
 import json
 from collections import namedtuple
+import pdb
 
 Span = namedtuple('Span', 'first last color alpha')
 
@@ -91,9 +93,13 @@ class TimeSpans(object):
 
     def vertical_span(self, raw_span):
         try:
-            fr, to = self.to_counts(raw_span['from'], raw_span['to'])
-            return Span(first = fr,
-                        last  = to,
+            # fr, to = self.to_counts(raw_span['from'], raw_span['to'])
+            #return Span(first = fr,
+            #            last  = to,
+            #            color = raw_span.get('color', 0.2),
+            #            alpha = float(raw_span.get('alpha', 0.2)))
+            return Span(first = dt.datetime.strptime(raw_span['from'], '%Y-%m-%d %H:%M:%S'),
+                        last  = dt.datetime.strptime(raw_span['to'], '%Y-%m-%d %H:%M:%S'), 
                         color = raw_span.get('color', 0.2),
                         alpha = float(raw_span.get('alpha', 0.2)))
         except TypeError:
@@ -170,7 +176,7 @@ for f in the_pkl:
         try:
             for gap in metadata['gaps']:
                 try:
-                    fr, to = timeSpans.to_counts(gap['from'], gap['to'])
+                    # fr, to = timeSpans.to_counts(gap['from'], gap['to'])
                     metadata['vertical-spans'].append({
                         'from':  gap['from'],
                         'to':    gap['to'],
@@ -211,21 +217,24 @@ for f in the_pkl:
             mx_include = tt1
             mx_exclude = ma.masked_array([])
             exclude_counts.append(0)
-        
+
         r1counts.append(ma.masked_array(tt1, land(tt1 >= s1Left, tt1 <= s1Right)).count())
         r2counts.append(ma.masked_array(tt1, lor(land(tt1 <= s1Left, tt1 >= s2Left), land(tt1 >= s1Right, tt1 <= s2Right))).count())
         r3counts.append(ma.masked_array(tt1, lor(land(tt1 <= s2Left, tt1 >= s3Left), land(tt1 >= s2Right, tt1 <= s3Right))).count())
 
         if threshold is not None:
             print '\tExtreme counts greater than %f = %d' % (threshold, mx_exclude.count())
-            
+
         print '\tR1C=%d, R2C=%d, R3C=%d' % (r1counts[-1], r2counts[-1], r3counts[-1])
 
         my_dpi=96
 	fig, ax1 = plt.subplots(figsize=(1920/my_dpi, 1200/my_dpi), dpi=my_dpi, facecolor='w', edgecolor='k')
-	
-	ax1.plot(mx_include,"b.", markersize=2)
+
+        xdata = ts[1:].to_pydatetime()
+
+        ax1.plot(xdata, mx_include, "b.", markersize=2)
 	#plt.plot(tt2,"r")
+        ax1.set_xlim(xdata[0], xdata[-1])
 	ax1.grid(True)
         title = get_title_pattern(config, os.path.basename(f))
         if title is not None:
@@ -249,16 +258,19 @@ for f in the_pkl:
 
         if threshold is not None and not sigmas and plot_outliers and mx_exclude.count() > 0:
             ax2 = ax1.twinx()
-            ax2.plot(mx_exclude,"r.", markersize=10)
+            ax2.plot(xdata, mx_exclude,"r.", markersize=10)
+            ax2.set_xlim(xdata[0], xdata[-1])
             ax2.set_ylabel("Excluded Delta T values (seconds)", color='r')
             ax2.tick_params('y', colors='r')
 
-        last_element = len(tt1) - 1
+        first_element = xdata[0]
+        last_element = xdata[-1]
         for span in [timeSpans.vertical_span(vs) for vs in metadata.get('vertical-spans', [])]:
-            if span.first >= last_element or span.first < 0:
+            if span.first >= last_element or span.first < first_element:
                 continue
             plt.axvspan(span.first, min(span.last, last_element), facecolor=span.color, alpha=span.alpha)
 
+        fig.autofmt_xdate()
 	fig.tight_layout()
 	fig.savefig(outfile, dpi=my_dpi)
         plt.close(fig)
