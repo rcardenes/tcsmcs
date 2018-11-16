@@ -250,7 +250,7 @@ for f in the_pkl:
         if sigmas is not None:
             med = np.median(mx_include)
             std = np.std(mx_include)
-            ax1.set_ylim(med - (std * 2), med + (std * 2))
+            ax1.set_ylim(med - (std * sigmas), med + (std * sigmas))
         elif threshold is not None:
             ax1.set_ylim(0, threshold)
 
