@@ -43,7 +43,23 @@ def list_pkl_in_folder(folder):
     for root, dirnames, filenames in os.walk(folder):
         for filename in fnmatch.filter(filenames, '*.pkl'):
             matches.append(os.path.join(root, filename))
-    return sorted(matches, key=os.path.getmtime)
+    for match in sorted(matches, key=os.path.getmtime):
+        yield match[:-4]
+
+def load_per_file_config(metadata, site, subsys):
+    config = {
+        'titles': {}
+    }
+    for siteSub in metadata.get('per-site', []):
+        if not (siteSub['site'] == site and siteSub['subsys'] == subsys):
+            continue
+        config['titles'] = siteSub.get('titles', {})
+        break
+
+    return config
+
+def get_title_pattern(config, filename):
+    return config['titles'].get(filename)
 
 class TimeSpans(object):
     def __init__(self):
@@ -106,19 +122,20 @@ if args.list:
 if not source:
     the_pkl = list_pkl_in_folder(rawFilePath)
 else:
-    the_pkl = [os.path.join(rawFilePath, fname + '.pkl') for fname in source]
+    the_pkl = [os.path.join(rawFilePath, fname) for fname in source]
     args.force = True
 
 threshold = args.threshold
 sigmas = args.sigmas
 plot_outliers = args.outliers
 metadata = {}
-title = None
+config = {}
 
 if args.metadata is not None:
     try:
         with open(args.metadata) as md:
             metadata = json.load(md)
+            config = load_per_file_config(metadata, args.site, args.subsys)
     except IOError:
         print >> sys.stderr, "Not a valid path: %s" % args.metadata
 
@@ -134,14 +151,14 @@ r2counts = []
 r3counts = []
 
 for f in the_pkl:
-    outfile = "%s/%s%s" % (outpath, os.path.splitext(os.path.basename(f))[0], '.png')
+    outfile = "%s/%s.png" % (outpath, os.path.basename(f))
     print outfile
     # Has pickle file been processed inside the binary folder yet?
     if os.path.isfile(outfile) and not args.force:
         print "Will BYPASS %s..." % (f)
         continue
     else:
-        ts = pd.read_pickle(open(f, 'r'))
+        ts = pd.read_pickle(open(f + '.pkl', 'r'))
         timeSpans.set_data(ts)
         #print ts
         #myrange = "%s to %s" % (mydata['Timestamp'][0], mydata['Timestamp'][mydata.size-1] )
@@ -210,8 +227,12 @@ for f in the_pkl:
 	ax1.plot(mx_include,"b.", markersize=2)
 	#plt.plot(tt2,"r")
 	ax1.grid(True)
+        title = get_title_pattern(config, os.path.basename(f))
         if title is not None:
-            pass
+            ax1.set_title(title.format(**{
+                'srj': "Sample Rate Jitter",
+                'rng': "Range %s" % myrange
+                }))
         else:
             ax1.set_title("%s %s Sample Rate Jitter\nRange %s " % (site, system, myrange) )
 	ax1.set_xlabel("Sample Number")
